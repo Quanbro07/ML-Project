@@ -12,6 +12,7 @@ Source/
 │   ├── c50.py            # Baseline C5.0 (DecisionTreeClassifier với criterion='entropy')
 │   └── __init__.py       # Module export tiện ích
 ├── knn_model.py          # Lớp KNNModel cài đặt thuật toán đề xuất của bài báo
+├── data_loader.py        # Nạp sáu bộ dữ liệu và tạo pipeline tiền xử lý
 ├── requirements.txt      # Thư viện phụ thuộc
 └── README.md
 ```
@@ -35,20 +36,36 @@ Source/
 
 ## 3. Cách sử dụng
 
+Chạy ví dụ dưới đây từ thư mục `Source/`. Tên bộ dữ liệu hợp lệ gồm
+`glass`, `iris`, `heart`, `wine`, `diabetes` và `aust`.
+Từ thư mục gốc, chạy `python Source/data_loader.py` để tải các bộ dữ liệu UCI
+còn thiếu bằng `ucimlrepo` và lưu vào `Data/`. Những lần chạy sau đọc CSV
+tại chỗ. Diabetes dùng tệp `Data/Diabetes.csv` có sẵn.
+
 ```python
+from data_loader import load_dataset, make_preprocessor
 from knn_model import KNNModel
 from baseline import StandardKNN, C50Classifier
 from sklearn.model_selection import cross_val_score, StratifiedKFold
-from sklearn.datasets import load_iris
+from sklearn.pipeline import make_pipeline
 
-# Nạp dữ liệu
-X, y = load_iris(return_X_y=True)
-
-# Khởi tạo mô hình KNNModel với r=1, N=1
-model = KNNModel(r=1, N=1)
-
-# Đánh giá bằng 5-fold cross validation
+name = "iris"
+X, y = load_dataset(name)
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-scores = cross_val_score(model, X, y, cv=cv)
-print(f"kNNModel 5-fold CV Accuracy: {scores.mean():.4f}")
+
+models = {
+    "kNNModel": KNNModel(r=1, N=1),
+    **{f"{k}-NN": StandardKNN(n_neighbors=k) for k in (1, 3, 5)},
+    "C5.0 baseline": C50Classifier(),
+}
+for label, model in models.items():
+    pipeline = make_pipeline(make_preprocessor(name, k=3), model)
+    scores = cross_val_score(pipeline, X, y, cv=cv, scoring="accuracy")
+    print(f"{label} 5-fold accuracy = {scores.mean():.4f}")
 ```
+
+Pipeline điền giá trị thiếu, chuẩn hóa min–max cho cột số và mã hóa one-hot
+cho cột danh nghĩa. Mỗi bước được fit trên phần huấn luyện của từng fold.
+Bài báo không nêu số đặc trưng giữ lại. Mặc định `k="all"` giữ toàn bộ cột,
+còn `k=3` trong ví dụ chọn ba cột sau mã hóa bằng information gain.
+Truyền `data_home` nếu muốn đọc hoặc lưu CSV ở thư mục khác.
