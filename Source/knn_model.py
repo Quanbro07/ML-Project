@@ -1,16 +1,11 @@
 """
 kNNModel: A Model-Based Approach in Classification
-Dựa trên bài báo nghiên cứu:
-"KNN Model-Based Approach in Classification"
+Dựa trên bài báo: "KNN Model-Based Approach in Classification"
 (Gongde Guo, Hui Wang, David Bell, Yaxin Bi, Kieran Greer, 2003)
-
-Mô hình nén dữ liệu huấn luyện thành một tập các đại diện lân cận hình cầu
-dạng bộ 4 thành phần: <Cls, Sim, Num, Rep>
-hỗ trợ 2 kỹ thuật cắt tỉa (Pruning 1: N, Pruning 2: r) và 3 luật phân loại.
 """
 
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Tuple
 import numpy as np
 from scipy.spatial.distance import cdist
 from sklearn.base import BaseEstimator, ClassifierMixin
@@ -20,21 +15,7 @@ from sklearn.utils.validation import check_is_fitted
 @dataclass
 class Representative:
     """
-    Cấu trúc lưu trữ một đại diện hình cầu trong mô hình M:
-    <Cls(d_i), Sim(d_i), Num(d_i), Rep(d_i)>
-    
-    Attributes
-    ----------
-    cls : Any
-        Nhãn lớp của tâm đại diện.
-    sim : float
-        Bán kính hình cầu (khoảng cách Euclidean tới điểm xa nhất trong cụm lân cận).
-    num : int
-        Tổng số điểm dữ liệu được bao phủ bởi hình cầu này.
-    rep : np.ndarray
-        Vector đặc trưng (tọa độ) của tâm đại diện d_i.
-    member_indices : List[int]
-        Danh sách chỉ số các điểm huấn luyện thuộc cụm này (dùng cho Post-pruning).
+    Đại diện hình cầu trong mô hình M: <Cls(d_i), Sim(d_i), Num(d_i), Rep(d_i)>
     """
     cls: Any
     sim: float
@@ -50,148 +31,113 @@ class KNNModel(BaseEstimator, ClassifierMixin):
     Parameters
     ----------
     r : int, default=0
-        Độ chấp nhận lỗi (Error-tolerant degree - Pruning phương pháp 2).
-        Số lượng điểm khác nhãn tối đa được phép 'nuốt' vào trong vùng lân cận
-        khi mở rộng hình cầu. Mặc định r=0 (vùng lân cận thuần nhất 100%).
-        
+        Error-tolerant degree (Pruning 2): số điểm khác nhãn tối đa được phép
+        nằm lọt trong vùng lân cận khi mở rộng hình cầu.
     N : int, default=0
-        Ngưỡng cắt tỉa sau huấn luyện (Post-pruning threshold - Pruning phương pháp 1).
-        Quy ước N > i trong bài báo: loại bỏ các đại diện có Num <= N, xóa các điểm
-        thuộc các đại diện đó khỏi tập huấn luyện, sau đó huấn luyện lại 1 lượt duy nhất.
-        Mặc định N=0 (không cắt tỉa).
-        
+        Post-pruning threshold (Pruning 1): loại bỏ các đại diện có Num <= N
+        cùng các điểm thuộc đại diện đó, rồi huấn luyện lại 1 lượt.
+        (Theo quy ước N > i trong bài báo: truyền N=1 tương ứng N > 1).
     metric : str, default='euclidean'
-        Độ đo khoảng cách, mặc định là khoảng cách Euclidean.
+        Độ đo khoảng cách truyền cho scipy.spatial.distance.cdist.
     """
-    def __init__(
-        self,
-        r: int = 0,
-        N: int = 0,
-        metric: str = 'euclidean'
-    ):
+
+    def __init__(self, r: int = 0, N: int = 0, metric: str = "euclidean"):
         self.r = r
         self.N = N
         self.metric = metric
 
     def _build_model(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        r: int
+        self, X: np.ndarray, y: np.ndarray, r: int
     ) -> List[Representative]:
-        """
-        Thuật toán 6 bước xây dựng mô hình đại diện M từ tập dữ liệu.
-        
-        Parameters
-        ----------
-        X : np.ndarray, shape (n_samples, n_features)
-        y : np.ndarray, shape (n_samples,)
-        r : int, độ dung nạp lỗi
-        
-        Returns
-        -------
-        representatives : List[Representative]
-            Tập hợp các bộ đại diện tạo thành mô hình M.
-        """
+        """Xây dựng tập đại diện M theo thuật toán 6 bước của Guo et al. (2003)."""
         n_samples = len(X)
         if n_samples == 0:
             return []
 
-        # Bước 1: Tạo ma trận khoảng cách O(n^2)
+        # Bước 1: Tạo ma trận khoảng cách và sắp xếp lân cận 1 lần duy nhất
         dist_matrix = cdist(X, X, metric=self.metric)
+        sorted_all_indices = np.argsort(dist_matrix, axis=1)
 
-        # Bước 2: Khởi tạo trạng thái 'ungrouped' (False = ungrouped, True = grouped)
+        # Bước 2: Khởi tạo trạng thái 'ungrouped'
         grouped = np.zeros(n_samples, dtype=bool)
         representatives: List[Representative] = []
 
-        # Lặp Bước 3 và Bước 4 cho đến khi tất cả điểm đều 'grouped'
+        # Bước 3–5: Lặp cho đến khi toàn bộ điểm đều được gán nhãn 'grouped'
         while not np.all(grouped):
             ungrouped_indices = np.where(~grouped)[0]
-            
             best_candidate_idx = None
-            best_sim = float('inf')
+            best_sim = float("inf")
             best_num = -1
             best_covered_indices: List[int] = []
 
-            # Bước 3: Tìm lân cận cục bộ lớn nhất (Largest Local Neighbourhood)
-            # cho từng điểm d_i đang ungrouped
             for i in ungrouped_indices:
                 target_cls = y[i]
-                
-                # Khoảng cách từ d_i tới tất cả các điểm ungrouped khác
-                dists_to_ungrouped = dist_matrix[i, ungrouped_indices]
-                sorted_order = np.argsort(dists_to_ungrouped)
-                sorted_ungrouped = ungrouped_indices[sorted_order]
-                sorted_dists = dists_to_ungrouped[sorted_order]
+                neighbors = sorted_all_indices[i]
+                dists = dist_matrix[i, neighbors]
 
-                # Mở rộng vùng lân cận quanh d_i
                 current_errors = 0
-                covered_for_i: List[int] = []
-                farthest_dist = 0.0
+                committed_covered: List[int] = [int(i)]
+                committed_same_count = 1
+                committed_farthest_dist = 0.0
+                pending_errors: List[int] = []
 
-                for point_idx, d_val in zip(sorted_ungrouped, sorted_dists):
-                    point_cls = y[point_idx]
-                    
-                    if point_cls != target_cls:
+                for point_idx, d_val in zip(neighbors, dists):
+                    if point_idx == i:
+                        continue
+
+                    if y[point_idx] != target_cls:
+                        # Mọi điểm khác lớp (kể cả đã grouped) đều tính vào ngân sách lỗi r
                         if current_errors < r:
-                            # Chấp nhận lỗi theo tham số r
                             current_errors += 1
-                            covered_for_i.append(int(point_idx))
-                            farthest_dist = float(d_val)
+                            if not grouped[point_idx]:
+                                pending_errors.append(int(point_idx))
                         else:
-                            # Đã đạt giới hạn lỗi r, dừng mở rộng hình cầu
                             break
                     else:
-                        covered_for_i.append(int(point_idx))
-                        farthest_dist = float(d_val)
+                        if not grouped[point_idx]:
+                            # Chỉ gộp các điểm lỗi nằm lọt bên trong giữa các điểm cùng lớp
+                            if pending_errors:
+                                committed_covered.extend(pending_errors)
+                                pending_errors = []
+                            committed_covered.append(int(point_idx))
+                            committed_same_count += 1
+                            committed_farthest_dist = float(d_val)
 
-                num_covered = len(covered_for_i)
-
-                # Bước 4: Chọn đại diện toàn cục (Largest Global Neighbourhood)
-                # Tiêu chí: max(Num), nếu hòa (tie-breaking) thì min(Sim)
-                is_better = False
-                if num_covered > best_num:
-                    is_better = True
-                elif num_covered == best_num:
-                    if farthest_dist < best_sim:
-                        is_better = True
-
-                if is_better:
+                # Bước 4: Chọn largest global neighbourhood (max Num, hòa thì min Sim)
+                if (committed_same_count > best_num) or (
+                    committed_same_count == best_num
+                    and committed_farthest_dist < best_sim
+                ):
                     best_candidate_idx = i
-                    best_num = num_covered
-                    best_sim = farthest_dist
-                    best_covered_indices = covered_for_i
+                    best_num = committed_same_count
+                    best_sim = committed_farthest_dist
+                    best_covered_indices = committed_covered
 
-            # Tạo bộ đại diện 4 thành phần <Cls, Sim, Num, Rep>
-            rep_obj = Representative(
-                cls=y[best_candidate_idx],
-                sim=best_sim,
-                num=best_num,
-                rep=X[best_candidate_idx].copy(),
-                member_indices=best_covered_indices
+            representatives.append(
+                Representative(
+                    cls=y[best_candidate_idx],
+                    sim=best_sim,
+                    num=best_num,
+                    rep=X[best_candidate_idx].copy(),
+                    member_indices=best_covered_indices,
+                )
             )
-            representatives.append(rep_obj)
-
-            # Đổi trạng thái các điểm nằm trong vùng phủ thành 'grouped'
             grouped[best_covered_indices] = True
 
         return representatives
 
     def fit(self, X: Any, y: Any):
-        """
-        Huấn luyện mô hình kNNModel trên tập dữ liệu X, y.
-        Tự động áp dụng Pruning 1 (Post-pruning & Retraining) nếu N > 0.
-        """
+        """Huấn luyện kNNModel, áp dụng Pruning 1 (N) và Pruning 2 (r)."""
         X_arr = np.asarray(X, dtype=np.float64)
         y_arr = np.asarray(y)
-        
+
         self.classes_ = np.unique(y_arr)
-        
-        # Lượt 1: Huấn luyện mô hình ban đầu với tham số r (Pruning 2)
+        self.n_train_samples_ = len(X_arr)
+
+        # Lượt 1: xây dựng mô hình ban đầu với độ dung nạp lỗi r
         initial_reps = self._build_model(X_arr, y_arr, r=self.r)
 
-        # Kiểm tra Pruning 1 (Post-pruning & Retraining với tham số N)
-        # N > i nghĩa là loại bỏ các đại diện có Num <= N
+        # Pruning 1: loại bỏ đại diện có Num <= N cùng các điểm thuộc đại diện đó rồi train lại
         if self.N > 0:
             weak_points_mask = np.zeros(len(X_arr), dtype=bool)
             has_pruned = False
@@ -202,14 +148,14 @@ class KNNModel(BaseEstimator, ClassifierMixin):
                     weak_points_mask[rep.member_indices] = True
 
             if has_pruned:
-                # Xóa các điểm thuộc các đại diện yếu để tạo D'
                 keep_mask = ~weak_points_mask
                 X_retrain = X_arr[keep_mask]
                 y_retrain = y_arr[keep_mask]
 
-                # Nếu còn dữ liệu sau khi lọc, chạy lại đúng 1 lượt
-                if len(X_retrain) > 0 and len(np.unique(y_retrain)) > 0:
-                    self.representatives_ = self._build_model(X_retrain, y_retrain, r=self.r)
+                if len(X_retrain) > 0:
+                    self.representatives_ = self._build_model(
+                        X_retrain, y_retrain, r=self.r
+                    )
                 else:
                     self.representatives_ = initial_reps
             else:
@@ -217,80 +163,80 @@ class KNNModel(BaseEstimator, ClassifierMixin):
         else:
             self.representatives_ = initial_reps
 
+        # Lưu thông tin nén và mảng tâm/bán kính để dự đoán nhanh
+        self.n_representatives_ = len(self.representatives_)
+        self.reduction_rate_ = (
+            (1.0 - self.n_representatives_ / self.n_train_samples_) * 100.0
+            if self.n_train_samples_ > 0
+            else 0.0
+        )
+        self._rep_centers_ = np.array(
+            [rep.rep for rep in self.representatives_], dtype=np.float64
+        )
+        self._rep_sims_ = np.array(
+            [rep.sim for rep in self.representatives_], dtype=np.float64
+        )
         return self
 
-    def predict_single(self, x_t: np.ndarray) -> Any:
-        """
-        Dự đoán nhãn cho 1 điểm dữ liệu mới x_t dựa trên 3 trường hợp của bài báo:
-        - TH1: Chỉ nằm trong 1 vùng đại diện -> gán nhãn của đại diện đó.
-        - TH2: Nằm trong vùng giao của >= 2 đại diện -> gán nhãn của đại diện có Num lớn nhất.
-        - TH3: Nằm ngoài tất cả -> tính khoảng cách tới biên dt = d(x_t, Rep) - Sim,
-               gán nhãn của đại diện có dt nhỏ nhất (1-NN tới biên).
-        """
-        if not self.representatives_:
-            raise ValueError("Mô hình chưa có đại diện nào được huấn luyện!")
+    def _predict_from_dists(self, dists: np.ndarray) -> Any:
+        """Phân loại 1 điểm từ vector khoảng cách tới các tâm đại diện theo 3 luật của bài báo."""
+        covering_reps: List[Tuple[Representative, float]] = [
+            (rep, float(d_val))
+            for rep, d_val in zip(self.representatives_, dists)
+            if d_val <= rep.sim
+        ]
 
-        # Tính khoảng cách Euclidean từ x_t tới tất cả các tâm đại diện
-        rep_centers = np.array([rep.rep for rep in self.representatives_])
-        dists = np.linalg.norm(rep_centers - x_t, axis=1)
-
-        # Tìm các đại diện bao phủ x_t: d(x_t, Rep_j) <= Sim_j
-        covering_reps: List[Tuple[Representative, float]] = []
-        for rep, d_val in zip(self.representatives_, dists):
-            if d_val <= rep.sim:
-                covering_reps.append((rep, d_val))
-
-        # TH1: dt chỉ nằm trong 1 vùng đại diện
+        # Luật 1: Chỉ nằm trong 1 vùng đại diện
         if len(covering_reps) == 1:
             return covering_reps[0][0].cls
 
-        # TH2: dt nằm trong vùng giao của >= 2 đại diện
-        elif len(covering_reps) > 1:
-            # Kiểm tra nếu tất cả đại diện bao phủ đều cùng 1 nhãn
-            covering_classes = [item[0].cls for item in covering_reps]
-            if len(set(covering_classes)) == 1:
-                return covering_classes[0]
-
-            # Khác nhãn: chọn đại diện có Num lớn nhất
-            # Quy tắc hòa: nếu hòa Num thì chọn Sim nhỏ nhất
+        # Luật 2: Nằm trong vùng giao của >= 2 đại diện -> chọn Num lớn nhất (hòa thì Sim nhỏ nhất)
+        if len(covering_reps) > 1:
+            covering_classes = {item[0].cls for item in covering_reps}
+            if len(covering_classes) == 1:
+                return covering_reps[0][0].cls
             best_rep = max(
-                covering_reps,
-                key=lambda item: (item[0].num, -item[0].sim)
+                covering_reps, key=lambda item: (item[0].num, -item[0].sim)
             )[0]
             return best_rep.cls
 
-        # TH3: dt nằm ngoài tất cả các vùng đại diện
-        else:
-            # dt(d_t, d_i) = d(d_t, Rep(d_i)) - Sim(d_i)
-            boundary_distances = dists - np.array([rep.sim for rep in self.representatives_])
-            
-            # Chọn đại diện có khoảng cách tới biên nhỏ nhất
-            # Quy tắc hòa: nếu cùng dt thì chọn đại diện có Num lớn hơn
-            min_boundary_dist = np.min(boundary_distances)
-            candidate_indices = np.where(np.isclose(boundary_distances, min_boundary_dist, atol=1e-8))[0]
-            
-            if len(candidate_indices) == 1:
-                return self.representatives_[candidate_indices[0]].cls
-            else:
-                best_idx = max(
-                    candidate_indices,
-                    key=lambda idx: (self.representatives_[idx].num, -self.representatives_[idx].sim)
-                )
-                return self.representatives_[best_idx].cls
+        # Luật 3: Nằm ngoài tất cả -> chọn đại diện có khoảng cách tới biên d(x_t, Rep) - Sim nhỏ nhất
+        boundary_distances = dists - self._rep_sims_
+        min_boundary_dist = np.min(boundary_distances)
+        candidate_indices = np.where(
+            np.isclose(boundary_distances, min_boundary_dist, atol=1e-8)
+        )[0]
+
+        if len(candidate_indices) == 1:
+            return self.representatives_[candidate_indices[0]].cls
+
+        best_idx = max(
+            candidate_indices,
+            key=lambda idx: (
+                self.representatives_[idx].num,
+                -self.representatives_[idx].sim,
+            ),
+        )
+        return self.representatives_[best_idx].cls
+
+    def predict_single(self, x_t: np.ndarray) -> Any:
+        """Dự đoán nhãn cho 1 mẫu dữ liệu."""
+        check_is_fitted(self, attributes=["representatives_", "classes_"])
+        if not self.representatives_:
+            raise ValueError("Mô hình chưa có đại diện nào được huấn luyện!")
+        x_arr = np.asarray(x_t, dtype=np.float64).reshape(1, -1)
+        dists = cdist(x_arr, self._rep_centers_, metric=self.metric)[0]
+        return self._predict_from_dists(dists)
 
     def predict(self, X: Any) -> np.ndarray:
-        """
-        Dự đoán nhãn cho tập mẫu kiểm tra X.
-        
-        Parameters
-        ----------
-        X : array-like, shape (n_samples, n_features)
-        
-        Returns
-        -------
-        y_pred : np.ndarray, shape (n_samples,)
-        """
+        """Dự đoán nhãn cho tập mẫu kiểm tra X."""
         check_is_fitted(self, attributes=["representatives_", "classes_"])
+        if not self.representatives_:
+            raise ValueError("Mô hình chưa có đại diện nào được huấn luyện!")
         X_arr = np.asarray(X, dtype=np.float64)
-        predictions = [self.predict_single(x_t) for x_t in X_arr]
-        return np.array(predictions)
+        dist_matrix = cdist(X_arr, self._rep_centers_, metric=self.metric)
+        return np.array([self._predict_from_dists(dists) for dists in dist_matrix])
+
+
+# Alias tương thích nếu notebook đang gọi tên KNNModelFixed
+KNNModelFixed = KNNModel
