@@ -18,12 +18,20 @@ from knn_model import KNNModel
 
 CV = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
+TOP_K = {
+    "glass": 7,
+    "iris": 3,
+    "heart": 11,
+    "wine": 10,
+    "diabetes": 6,
+    "aust": 12,
+}
 
 def evaluate_table3(dataset_name: str, n_value: int) -> dict:
     X, y = load_dataset(dataset_name)
     classifier = KNNModel(r=1, N=n_value, metric="euclidean")
     pipeline = Pipeline([
-        ("preprocess", make_preprocessor(dataset_name, k="all")),
+        ("preprocess", make_preprocessor(dataset_name, k=TOP_K[dataset_name])),
         ("classifier", classifier),
     ])
 
