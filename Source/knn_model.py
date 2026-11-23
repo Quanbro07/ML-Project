@@ -117,7 +117,7 @@ class KNNModel(BaseEstimator, ClassifierMixin):
                 Representative(
                     cls=y[best_candidate_idx],
                     sim=best_sim,
-                    num=best_num,
+                    num=len(best_covered_indices),
                     rep=X[best_candidate_idx].copy(),
                     member_indices=best_covered_indices,
                 )
